@@ -23,7 +23,7 @@ void init_timer(int delay, void (*sig_handler)(int));
 
 
 #define STDIN_FD    0
-#define RETRY  500 //millisecond
+#define RETRY  120 //millisecond
 int next_seqno=0;
 int send_base=0;
 int window_size = 10; //window size changed to 10 packets
@@ -263,7 +263,7 @@ int main (int argc, char **argv)
         fflush(stdout);
         
         // Check if this ACK is for the EOF packet
-        if (eof_packet_sent && recvpkt->hdr.ackno >= next_seqno) {
+        if (eof_packet_sent && recvpkt->hdr.ackno >= next_seqno && recvpkt->hdr.ctr_flags==FIN) {
             printf("Received ACK for EOF packet\n");
             eof_acked = 1;
             stop_timer();

@@ -152,7 +152,7 @@ int main(int argc, char **argv) {
             // Always ACK the EOF packet with the expectedseq value
             sndpkt = make_packet(0);
             sndpkt->hdr.ackno = expectedseq;  // Use the next expected sequence number
-            sndpkt->hdr.ctr_flags = ACK;
+            sndpkt->hdr.ctr_flags = FIN;
             
             if (sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, 
                     (struct sockaddr *) &clientaddr, clientlen) < 0) {
