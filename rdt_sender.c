@@ -10,7 +10,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <assert.h>
-
+#include <limits.h>  // For INT_MAX
 #include"packet.h"
 #include"common.h"
 
@@ -21,6 +21,8 @@ int next_seqno=0;
 int send_base=0;
 int packetnum=0;
 tcp_packet* window[window_size];
+int packet_seqnos[window_size]; // To keep track of sequence numbers in the window
+int window_count = 0; // Count of active packets in the window
 int duplicatepackets[3]={-1,-1,-1};
 int dupepacketindex=0;
 int eof_sent = 0;
@@ -35,8 +37,15 @@ tcp_packet *recvpkt;
 sigset_t sigmask;       
 tcp_packet *eof_packet = NULL;
 
+enum {
+    SENDING_DATA,
+    WAITING_FOR_EOF_ACK,
+    TERMINATED
+} sender_state = SENDING_DATA;
 
-
+// Forward declaration
+void cleanup_resources();
+int find_oldest_unacked_packet();
 
 void start_timer()
 {
@@ -44,28 +53,49 @@ void start_timer()
     setitimer(ITIMER_REAL, &timer, NULL);
 }
 
-
 void stop_timer()
 {
     sigprocmask(SIG_BLOCK, &sigmask, NULL);
 }
 
-void resend_packets(int sig)
-{
-    if (sig == SIGALRM)
-    {
+void resend_packets(int sig) {
+    if (sig == SIGALRM) {
         stop_timer();
-        printf("oldestpacket being retrasmitted seqno: %d\n",  window[oldestpacket%window_size]->hdr.seqno);
-
-        VLOG(INFO, "Timeout happend");
-        if(sendto(sockfd, window[oldestpacket%window_size], TCP_HDR_SIZE + get_data_size(window[oldestpacket%window_size]), 0, 
-                    ( const struct sockaddr *)&serveraddr, serverlen) < 0)
-        {
-            error("sendto");
-        }
+        
+        // Check if we're waiting for EOF acknowledgment
+        if (eof_sent && sender_state == WAITING_FOR_EOF_ACK) {
+            fprintf(stdout, "Retransmitting EOF packet\n");
+            // Ensure flag is set for EOF packet
+            eof_packet->hdr.ctr_flags = FIN;
+            if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0, 
+                    (const struct sockaddr *)&serveraddr, serverlen) < 0) {
+                error("sendto");
+            }
+        } else {
+            // Find the oldest unacknowledged packet
+            int oldest_idx = find_oldest_unacked_packet();
             
+            if (oldest_idx != -1) {
+                oldestpacket = oldest_idx;  // Update the oldestpacket tracker
+                fprintf(stdout, "Retransmitting packet with seqno: %d\n", 
+                       window[oldest_idx]->hdr.seqno);
+                VLOG(INFO, "Timeout happened");
+                
+                // Actually send the packet
+                if(sendto(sockfd, window[oldest_idx], 
+                         TCP_HDR_SIZE + get_data_size(window[oldest_idx]), 0, 
+                         (const struct sockaddr *)&serveraddr, serverlen) < 0) {
+                    error("sendto");
+                }
+            } else {
+                fprintf(stdout, "No unacknowledged packets in window\n");
+            }
+        }
+        
+        start_timer();
     }
 }
+
 /*
  * init_timer: Initialize timer
  * delay: delay in milliseconds
@@ -81,6 +111,36 @@ void init_timer(int delay, void (*sig_handler)(int))
 
     sigemptyset(&sigmask);
     sigaddset(&sigmask, SIGALRM);
+}
+
+void cleanup_resources() {
+    // Free any allocated window packets
+    for (int i = 0; i < window_size; i++) {
+        if (window[i] != NULL) {
+            free(window[i]);
+            window[i] = NULL;
+        }
+    }
+    
+    // Free EOF packet if it exists
+    if (eof_packet != NULL) {
+        free(eof_packet);
+        eof_packet = NULL;
+    }
+}
+
+int find_oldest_unacked_packet() {
+    int oldest_idx = -1;
+    int oldest_seqno = INT_MAX;
+    
+    for (int i = 0; i < window_size; i++) {
+        if (window[i] != NULL && window[i]->hdr.seqno >= send_base && window[i]->hdr.seqno < oldest_seqno) {
+            oldest_seqno = window[i]->hdr.seqno;
+            oldest_idx = i;
+        }
+    }
+    
+    return oldest_idx;
 }
 
 
@@ -108,7 +168,6 @@ int main (int argc, char **argv)
     if (sockfd < 0) 
         error("ERROR opening socket");
 
-
     /* initialize server server details */
     bzero((char *) &serveraddr, sizeof(serveraddr));
     serverlen = sizeof(serveraddr);
@@ -126,206 +185,241 @@ int main (int argc, char **argv)
     assert(MSS_SIZE - TCP_HDR_SIZE > 0);
 
     //Stop and wait protocol
-
     init_timer(RETRY, resend_packets);
 
-    while (packetnum<10){
+    // Initialize the window with initial packets
+    while (packetnum < window_size) {
         len = fread(buffer, 1, DATA_SIZE, fp);
-        if ( len <= 0)
-        {
+        if (len <= 0) {
             VLOG(INFO, "End Of File has been reached");
             sndpkt = make_packet(0);
-            window[packetnum]=sndpkt;
+            eof_packet = sndpkt;  
+            window[packetnum] = sndpkt;
+            packet_seqnos[packetnum] = next_seqno; // Store sequence number
+            
+            // Set header flags to indicate EOF
+            sndpkt->hdr.ctr_flags = FIN;  // Mark as EOF packet
+            
             packetnum++;
-            eof_sent=1;
+            window_count++;
+            eof_sent = 1;
+            sender_state = WAITING_FOR_EOF_ACK;
             break;
         }
-        send_base=next_seqno;
-        next_seqno += len;
-        last_data_byte=next_seqno;
+        
         sndpkt = make_packet(len);
         memcpy(sndpkt->data, buffer, len);
-        sndpkt->hdr.seqno = send_base;
-        window[packetnum]=sndpkt;
+        sndpkt->hdr.seqno = next_seqno;
+        window[packetnum] = sndpkt;
+        packet_seqnos[packetnum] = next_seqno; // Store sequence number
+        
+        next_seqno += len;
+        last_data_byte = next_seqno;
         packetnum++;
+        window_count++;
     }
-    send_base=0;
-    int packetseq=0;
-    for (int i=0;i<packetnum;i++){
+    send_base = 0;
+
+    // Send initial packets
+    for (int i = 0; i < packetnum; i++) {
         VLOG(DEBUG, "Sending packet %d to %s", 
-            packetseq, inet_ntoa(serveraddr.sin_addr));
-            packetseq=packetseq+get_data_size(window[i]);
-    /*
-     * If the sendto is called for the first time, the system will
-     * will assign a random port number so that server can send its
-     * response to the src port.
-     */
-    if(sendto(sockfd, window[i], TCP_HDR_SIZE + get_data_size(window[i]), 0, 
-                ( const struct sockaddr *)&serveraddr, serverlen) < 0)
-    {
-        error("sendto");
+            window[i]->hdr.seqno, inet_ntoa(serveraddr.sin_addr));
+        
+        if(sendto(sockfd, window[i], TCP_HDR_SIZE + get_data_size(window[i]), 0, 
+                  (const struct sockaddr *)&serveraddr, serverlen) < 0) {
+            error("sendto");
+        }
     }
-    start_timer();
+    // Start timer after sending all initial packets
+    if (packetnum > 0) {
+        start_timer();
     }
 
     while (1)
     {
         if(recvfrom(sockfd, buffer, MSS_SIZE, 0,(struct sockaddr *) &serveraddr, (socklen_t *)&serverlen) < 0){
-                    error("recvfrom");
-
-                }
-                recvpkt = (tcp_packet *)buffer;
-                printf("ack received: %d\n", recvpkt->hdr.ackno);
-                // printf("%d \n", get_data_size(recvpkt));
-                assert(get_data_size(recvpkt) <= DATA_SIZE);
-  if (recvpkt->hdr.ackno > send_base) {
-    stop_timer();
-    for (int i = 0; i < 3; i++) {
-        duplicatepackets[i] = -1;  // Clear the array
-    }
-    duplicatepackets[0] = recvpkt->hdr.ackno;  // Store the new ACK
-    dupepacketindex = 1;
-    
-    // Update send_base to the new acknowledged position
-    int old_base = send_base;
-    send_base = recvpkt->hdr.ackno;
-    
-    fprintf(stdout, "ACK received: %d, updating send_base from %d to %d\n", 
-           recvpkt->hdr.ackno, old_base, send_base);
-    
-    // Check if all data is acknowledged
-    fprintf(stdout, "EOF: %d, send_base: %d, last_data_byte: %d\n", 
-            eof_sent, send_base, last_data_byte);
-            
-    if (recvpkt->hdr.ackno >= last_data_byte && last_data_byte <= send_base) {
-        if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0, 
-            (const struct sockaddr *)&serveraddr, serverlen) < 0) {
-                error("sendto");
-                }
-        fprintf(stdout, "All data acknowledged. Clean exit.\n");
-        return 1;
-    }
-    for (int i=0;i<window_size;i++){
-        printf("%d,",window[i]->hdr.data_size);
-    }
-    printf("\n");
-    // Only calculate and send new packets if we haven't reached EOF yet
-    if (!eof_sent) {
-        // Calculate how many new packets we can send to fill the window
-        int packets_to_send = 0;
-        int oldoldestpacket = oldestpacket;
-        int temp_base = old_base;
-        
-        while (temp_base < send_base) {
-            temp_base += get_data_size(window[oldoldestpacket % window_size]);
-            oldoldestpacket++;
-            packets_to_send++;
+            error("recvfrom");
         }
         
-        fprintf(stdout, "Sending %d new packets to fill window\n", packets_to_send);
-
-        // Send new packets only if we haven't reached EOF
-        for (int i=0; i<packets_to_send; i++) {
-            len = fread(buffer, 1, DATA_SIZE, fp);
-            if (len <= 0) {
-                // End of file reached - create EOF packet but DON'T put it in the window
-                fprintf(stdout, "EOF reached, sending EOF packet\n");
-                eof_packet = make_packet(0);
-                // if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0, 
-                //     (const struct sockaddr *)&serveraddr, serverlen) < 0) {
-                //     error("sendto");
-                // }
+        recvpkt = (tcp_packet *)buffer;
+        printf("ack received: %d\n", recvpkt->hdr.ackno);
+        assert(get_data_size(recvpkt) <= DATA_SIZE);
+        
+        if (recvpkt->hdr.ackno > send_base) {
+            int old_send_base = send_base; // Store the old send_base value
+            stop_timer();
+            
+            // Clear duplicate ACK array
+            for (int i = 0; i < 3; i++) {
+                duplicatepackets[i] = -1;
+            }
+            duplicatepackets[0] = recvpkt->hdr.ackno;
+            dupepacketindex = 1;
+            
+            // Update send_base to the new acknowledged position
+            send_base = recvpkt->hdr.ackno;
+            
+            fprintf(stdout, "ACK received: %d, updating send_base from %d to %d\n", 
+                   recvpkt->hdr.ackno, old_send_base, send_base);
+            
+            // Calculate number of packets that have been fully acknowledged
+            int freed_slots = 0;
+            for (int i = 0; i < window_size; i++) {
+                if (window[i] != NULL && window[i]->hdr.seqno + get_data_size(window[i]) <= send_base) {
+                    // This packet is fully acknowledged
+                    fprintf(stdout, "Packet with seqno %d is fully acknowledged\n", window[i]->hdr.seqno);
+                    window[i] = NULL; // Free the slot
+                    freed_slots++;
+                    window_count--;
+                }
+            }
+            
+            // Check if all data is acknowledged
+            fprintf(stdout, "EOF: %d, send_base: %d, last_data_byte: %d\n", 
+                    eof_sent, send_base, last_data_byte);
+                    
+            if (eof_sent && send_base >= last_data_byte) {
+                sender_state = TERMINATED;
+                fprintf(stdout, "All data acknowledged including EOF. Clean exit.\n");
                 
-                // Mark EOF as sent
-                eof_sent = 1;
-
-                if (send_base < next_seqno) {
-                    start_timer();
+                // Send final acknowledgment to ensure receiver knows we're done
+                if (eof_packet != NULL) {
+                    // Send one last time to ensure receipt
+                    if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0, 
+                            (const struct sockaddr *)&serveraddr, serverlen) < 0) {
+                        error("sendto");
+                    }
+                    fprintf(stdout, "Sent final EOF confirmation\n");
                 }
-                break;
-                // Break out of the sending loop
-            }
-            // Update last_data_byte for normal packets
-            printf("seqno: %d\n",next_seqno);
-            printf("len: %d\n",len);
-            
-            
-            // Create and send a new packet
-            sndpkt = make_packet(len);
-            memcpy(sndpkt->data, buffer, len);
-            sndpkt->hdr.seqno = next_seqno;
-            // Store the packet in the window and send it
-            window[oldestpacket % window_size] = sndpkt;
-            
-            if (len>0){
-            if(sendto(sockfd, sndpkt, TCP_HDR_SIZE + len, 0, 
-                     (const struct sockaddr *)&serveraddr, serverlen) < 0) {
-                error("sendto");
+                
+                stop_timer(); // Important to stop the timer before exiting
+                cleanup_resources();
+                return 1;
             }
             
-            fprintf(stdout, "Sending data packet %d (size %d)\n", next_seqno, len);
-        }
-            oldestpacket++;
-            next_seqno += len;
-            last_data_byte = next_seqno;
+            // Only read and send new packets if we haven't reached EOF yet
+            if (!eof_sent) {
+                // Send new packets to fill the freed slots
+                for (int i = 0; i < freed_slots; i++) {
+                    // Find a free slot in the window
+                    int free_slot = -1;
+                    for (int j = 0; j < window_size; j++) {
+                        if (window[j] == NULL) {
+                            free_slot = j;
+                            break;
+                        }
+                    }
+                    
+                    // If we found a free slot, read a new packet and send it
+                    if (free_slot != -1) {
+                        len = fread(buffer, 1, DATA_SIZE, fp);
+                        if (len <= 0) {
+                            // End of file reached - create EOF packet
+                            fprintf(stdout, "EOF reached, sending EOF packet\n");
+                            eof_packet = make_packet(0);
+                            eof_packet->hdr.ctr_flags = FIN;  // Mark as EOF
+                            
+                            if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0, 
+                                (const struct sockaddr *)&serveraddr, serverlen) < 0) {
+                                error("sendto");
+                            }
+                            
+                            // Mark EOF as sent
+                            eof_sent = 1;
+                            sender_state = WAITING_FOR_EOF_ACK;
+                            break;
+                        }
+                        
+                        // Create and send a new packet
+                        sndpkt = make_packet(len);
+                        memcpy(sndpkt->data, buffer, len);
+                        sndpkt->hdr.seqno = next_seqno;
+                        
+                        // Store the packet in the window and send it
+                        window[free_slot] = sndpkt;
+                        window_count++;
+                        
+                        fprintf(stdout, "Sending data packet %d (size %d) in slot %d\n", 
+                                next_seqno, len, free_slot);
+                        
+                        if(sendto(sockfd, sndpkt, TCP_HDR_SIZE + len, 0, 
+                                 (const struct sockaddr *)&serveraddr, serverlen) < 0) {
+                            error("sendto");
+                        }
+                        
+                        next_seqno += len;
+                        last_data_byte = next_seqno;
+                    }
+                }
+            }
             
+            // Restart timer if there are unacknowledged packets
             if (send_base < next_seqno) {
                 start_timer();
             }
-        }
-    } 
-    else{
-        oldestpacket++;
-        if (send_base < next_seqno) {
-            start_timer();
-        }
-        
-    }
-
-}
-else{
-    duplicatepackets[dupepacketindex] = recvpkt->hdr.ackno;
-    dupepacketindex = (dupepacketindex + 1) % 3;
-    if (duplicatepackets[0] == duplicatepackets[1] && 
-        duplicatepackets[1] == duplicatepackets[2] && 
-        duplicatepackets[0] != -1) {
-        
-        fprintf(stdout, "Fast retransmit triggered for sequence %d\n", duplicatepackets[0]);
-        
-        // Find the packet to retransmit (should be the one with seqno equal to the duplicate ACK value)
-        int packet_to_retransmit = -1;
-        
-        for (int i = 0; i < window_size; i++) {
-            int idx = (oldestpacket + i) % window_size;
-            if (window[idx] != NULL && window[idx]->hdr.seqno == duplicatepackets[0]) {
-                packet_to_retransmit = idx;
-                break;
-            }
-        }
-        
-        // Retransmit the packet
-        if (packet_to_retransmit != -1) {
-            fprintf(stdout, "Retransmitting packet with sequence %d\n", window[packet_to_retransmit]->hdr.seqno);
-            
-            if (sendto(sockfd, window[packet_to_retransmit], 
-                      TCP_HDR_SIZE + get_data_size(window[packet_to_retransmit]), 0, 
-                      (const struct sockaddr *)&serveraddr, serverlen) < 0) {
-                error("sendto");
-            }
         } else {
-            fprintf(stdout, "Packet with sequence %d not found in window\n", duplicatepackets[0]);
+            duplicatepackets[dupepacketindex] = recvpkt->hdr.ackno;
+            dupepacketindex = (dupepacketindex + 1) % 3;
+            if (duplicatepackets[0] == duplicatepackets[1] && 
+                duplicatepackets[1] == duplicatepackets[2] && 
+                duplicatepackets[0] != -1) {
+                
+                fprintf(stdout, "Fast retransmit triggered for ACK sequence %d\n", duplicatepackets[0]);
+                
+                // The ACK value indicates the next expected byte, so we need to find the packet 
+                // whose seqno + data_size would reach this ACK value
+                int packet_to_retransmit = -1;
+                int expected_seqno = duplicatepackets[0];
+                
+                // First look for an exact match where a packet's end boundary equals the duplicate ACK
+                for (int i = 0; i < window_size; i++) {
+                    if (window[i] != NULL) {
+                        int packet_end = window[i]->hdr.seqno + get_data_size(window[i]);
+                        
+                        // This packet's end boundary matches the duplicate ACK value
+                        if (packet_end == expected_seqno) {
+                            packet_to_retransmit = i;
+                            fprintf(stdout, "Found exact packet match for duplicate ACK %d\n", expected_seqno);
+                            break;
+                        }
+                    }
+                }
+                
+                // If no exact match found, look for the first packet beyond the current ACK point
+                if (packet_to_retransmit == -1) {
+                    int lowest_seqno = INT_MAX;
+                    
+                    for (int i = 0; i < window_size; i++) {
+                        if (window[i] != NULL && window[i]->hdr.seqno >= send_base) {
+                            if (window[i]->hdr.seqno < lowest_seqno) {
+                                lowest_seqno = window[i]->hdr.seqno;
+                                packet_to_retransmit = i;
+                            }
+                        }
+                    }
+                }
+                
+                // Retransmit the identified packet
+                if (packet_to_retransmit != -1) {
+                    fprintf(stdout, "Fast retransmitting packet with sequence %d\n", 
+                            window[packet_to_retransmit]->hdr.seqno);
+                    
+                    if (sendto(sockfd, window[packet_to_retransmit], 
+                            TCP_HDR_SIZE + get_data_size(window[packet_to_retransmit]), 0, 
+                            (const struct sockaddr *)&serveraddr, serverlen) < 0) {
+                        error("sendto");
+                    }
+                }
+                
+                // Reset after fast retransmit
+                for (int i = 0; i < 3; i++) {
+                    duplicatepackets[i] = -1;
+                }
+                dupepacketindex = 0;
+            }
         }
-        
-        // Reset after fast retransmit
-        for (int i = 0; i < 3; i++) {
-            duplicatepackets[i] = -1;
-        }
-        dupepacketindex = 0;
-}
-    }
-}
-return 1;
-}
-
-
-
+    } // End of while(1) loop
+    
+    cleanup_resources();
+    return 1;
+} // End of main function
