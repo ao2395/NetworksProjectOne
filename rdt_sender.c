@@ -193,13 +193,13 @@ int main (int argc, char **argv)
         if (len <= 0) {
             VLOG(INFO, "End Of File has been reached");
             sndpkt = make_packet(0);
-            eof_packet = sndpkt;  
+            eof_packet = sndpkt;
             window[packetnum] = sndpkt;
-            packet_seqnos[packetnum] = next_seqno; // Store sequence number
-            
+            sndpkt->hdr.seqno = next_seqno;  // Set the correct sequence number for EOF
+            packet_seqnos[packetnum] = next_seqno;
+                        
             // Set header flags to indicate EOF
             sndpkt->hdr.ctr_flags = FIN;  // Mark as EOF packet
-            
             packetnum++;
             window_count++;
             eof_sent = 1;
@@ -317,6 +317,7 @@ int main (int argc, char **argv)
                             // End of file reached - create EOF packet
                             fprintf(stdout, "EOF reached, sending EOF packet\n");
                             eof_packet = make_packet(0);
+                            eof_packet->hdr.seqno = next_seqno;  // Set the correct sequence number for EOF
                             eof_packet->hdr.ctr_flags = FIN;  // Mark as EOF
                             
                             if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0, 
@@ -326,6 +327,7 @@ int main (int argc, char **argv)
                             
                             // Mark EOF as sent
                             eof_sent = 1;
+                            last_data_byte = next_seqno;  // Set last_data_byte to include the EOF packet
                             sender_state = WAITING_FOR_EOF_ACK;
                             break;
                         }
