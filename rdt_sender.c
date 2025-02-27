@@ -15,7 +15,6 @@
 #include"common.h"
 
 
-// function prototypes
 void start_timer(void);
 void stop_timer(void);
 void resend_packets(int sig);
@@ -23,11 +22,11 @@ void init_timer(int delay, void (*sig_handler)(int));
 
 
 #define STDIN_FD    0
-#define RETRY  120 //millisecond
+#define RETRY  120 
 int next_seqno=0;
 int send_base=0;
-int window_size = 10; //window size changed to 10 packets
-tcp_packet* packet_window[10]; //using an array to save the packets in the window
+int window_size = 10; // 10 windowsize
+tcp_packet* packet_window[10]; //window
 int sockfd, serverlen;
 struct sockaddr_in serveraddr;
 struct itimerval timer; 
@@ -37,20 +36,18 @@ sigset_t sigmask;
 int previous_acks[3] = {-1, -1, -1}; 
 int acknum = 0;
 int packet_count = 0;
-int eof_reached = 0;       // Flag to mark EOF reached
-int eof_packet_sent = 0;   // Flag to mark EOF packet sent
-int eof_acked = 0;         // Flag to mark EOF acknowledged
-tcp_packet *eof_packet = NULL;  // Store the EOF packet
+int eof_reached = 0;       // eof reached
+int eof_packet_sent = 0;   // eof sent
+int eof_acked = 0;         // eof acked
+tcp_packet *eof_packet = NULL;  // eof packet ptr
 
-void resend_packets(int sig) //editted to resend the oldest unacknowldged packet
+void resend_packets(int sig) //resend oldest packet
 {
     if (sig == SIGALRM)
     {
-        //Resend all packets range between 
-        //sendBase and nextSeqNum
         VLOG(INFO, "Timeout happend");
         
-        // Check if we need to resend the EOF packet
+        // resend eof packet if needed
         if (eof_reached && eof_packet_sent && !eof_acked) {
             printf("Timeout - Resending EOF packet\n");
             if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0, 
@@ -58,7 +55,7 @@ void resend_packets(int sig) //editted to resend the oldest unacknowldged packet
                 error("sendto");
             }
         } else {
-            // Normal case - resend the oldest unacknowledged packet
+            // send oldest packet normally
             tcp_packet* oldest_packet = packet_window[send_base/1456 % window_size]; 
             if (oldest_packet != NULL) {
                 printf("Timeout - Resending packet with seqno: %d\n", oldest_packet->hdr.seqno);
@@ -71,7 +68,7 @@ void resend_packets(int sig) //editted to resend the oldest unacknowldged packet
             }
         }
         
-        start_timer(); //starting the timer directly after resendnig   
+        start_timer(); // restart timer on oldest packet
     }
 }
 
@@ -97,9 +94,9 @@ void stop_timer()
 void init_timer(int delay, void (*sig_handler)(int)) 
 {
     signal(SIGALRM, sig_handler);
-    timer.it_interval.tv_sec = delay / 1000;    // sets an interval of the timer
+    timer.it_interval.tv_sec = delay / 1000;   
     timer.it_interval.tv_usec = (delay % 1000) * 1000;  
-    timer.it_value.tv_sec = delay / 1000;       // sets an initial value
+    timer.it_value.tv_sec = delay / 1000;     
     timer.it_value.tv_usec = (delay % 1000) * 1000;
 
     sigemptyset(&sigmask);
@@ -147,7 +144,7 @@ int main (int argc, char **argv)
     serveraddr.sin_port = htons(portno);
 
     assert(MSS_SIZE - TCP_HDR_SIZE > 0);
-    for(int i = 0; i < window_size; i++) {//initializing packet_window to null
+    for(int i = 0; i < window_size; i++) { // intalize packet window
         packet_window[i] = NULL;
     }
 
@@ -155,114 +152,84 @@ int main (int argc, char **argv)
     //Stop and wait protocol
     init_timer(RETRY, resend_packets);
     next_seqno = 0;
-    send_base = 0;  // Initialize send_base to 0
-    int fileclosed = 0;
+    send_base = 0;  
+    //int fileclosed = 0;
     
     while (1) {
-        // If EOF has been acknowledged, exit cleanly
+        // when eof is acked exit
         if (eof_acked) {
             printf("EOF packet has been acknowledged. Exiting cleanly.\n");
             break;
         }
         
-        // Only try to send if window isn't full and we haven't reached EOF
+        // send if window isnt full or isnt at eof
         while (next_seqno < send_base + window_size * DATA_SIZE && !eof_reached) {
-            len = fread(buffer, 1, DATA_SIZE, fp);
+            len = fread(buffer, 1, DATA_SIZE, fp); // read next packet
             
-            if (len <= 0) {
+            if (len <= 0) { // if eof reached
                 VLOG(INFO, "End Of File has been reached");
-                printf("EOF detected - creating EOF packet\n");
                 
-                // Create the EOF packet
                 eof_packet = make_packet(0);
                 eof_reached = 1;
-                fileclosed = 1;
+                //fileclosed = 1;
                 fclose(fp);
                 
-                // We don't send the EOF packet immediately
-                // We'll send it after all data packets are acknowledged
+                // dont send eof packet for now, ack everytihng else first
                 break;
             }
             
-            // Create and store the packet
+            // create new packets
             sndpkt = make_packet(len);
-            memcpy(sndpkt->data, buffer, len);
+            memcpy(sndpkt->data, buffer, len); // copy data 
             sndpkt->hdr.seqno = next_seqno;
             
-            // Store in window
-            int store_idx = (next_seqno / DATA_SIZE) % window_size;
-            packet_window[store_idx] = sndpkt;
+            // store in the window
+            int store_index = (next_seqno / DATA_SIZE) % window_size;
+            packet_window[store_index] = sndpkt;
             
-            // Log packet info
             VLOG(DEBUG, "Sending packet %d to %s", 
                 next_seqno, inet_ntoa(serveraddr.sin_addr));
             
-            // Send the packet
+            // send packet 
             if(sendto(sockfd, sndpkt, TCP_HDR_SIZE + len, 0, 
                     (const struct sockaddr *)&serveraddr, serverlen) < 0) {
                 error("sendto");
             }
             
-            // Start timer if this is the first packet in the window
+            // start timer for first packet 
             if(next_seqno == send_base) {
                 start_timer();
             }
             
-            // Update sequence number and packet count
+            // move next seqiuence number by data size
             next_seqno += len;
-            packet_count++;
+            packet_count++; 
         }
         
-        // If all data is acknowledged and we've reached EOF but haven't sent EOF packet yet
+        // if all data has been acked and eof packet hasnt been sent but has been reached
         if (eof_reached && !eof_packet_sent && send_base >= next_seqno) {
             printf("All data acknowledged, sending EOF packet\n");
-            if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0, 
+            if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0,  // send eof packet
                     (const struct sockaddr *)&serveraddr, serverlen) < 0) {
                 error("sendto");
             }
             eof_packet_sent = 1;
-            start_timer(); // Start timer for EOF packet
+            start_timer(); // eof packet timer
         }
         
-        // Print window state for debugging
-        // printf("Window state: ");
-        // for (int i = 0; i < window_size; i++) {
-        //     int idx = (send_base / DATA_SIZE + i) % window_size;
-        //     printf("%d", packet_window[idx] != NULL ? 1 : 0);
-        // }
-        // printf(" (base: %d, next: %d)\n", send_base, next_seqno);
-        // fflush(stdout);
         
-        // Try to receive ACK with a timeout
-        // fd_set readfds;
-        // struct timeval tv;
-        
-        // FD_ZERO(&readfds);
-        // FD_SET(sockfd, &readfds);
-        
-        // tv.tv_sec = 0;
-        // tv.tv_usec = 100000; // 100ms timeout
-        
-        // int ready = select(sockfd + 1, &readfds, NULL, NULL, &tv);
-        
-        // if (ready <= 0) {
-        //     continue; // Timeout or error, continue the loop
-        // }
-        
-        // ACK received
+        // receive acks
         if(recvfrom(sockfd, buffer, MSS_SIZE, 0,
                     (struct sockaddr *) &serveraddr, (socklen_t *)&serverlen) < 0) {
             continue;
         }
         
         recvpkt = (tcp_packet *)buffer;
-        printf("ACK RECEIVED: %d (send_base: %d) - %s\n", 
+        printf("ACK RECEIVED: %d (send_base: %d)\n", 
                recvpkt->hdr.ackno, 
-               send_base,
-               recvpkt->hdr.ackno <= send_base ? "DUPLICATE" : "NEW");
-        fflush(stdout);
+               send_base);
         
-        // Check if this ACK is for the EOF packet
+        // check if ack is for eof (FIN FLAG)
         if (eof_packet_sent && recvpkt->hdr.ackno >= next_seqno && recvpkt->hdr.ctr_flags==FIN) {
             printf("Received ACK for EOF packet\n");
             eof_acked = 1;
@@ -270,12 +237,11 @@ int main (int argc, char **argv)
             continue;
         }
         
-        if(recvpkt->hdr.ackno > send_base) {
-            // ACK for new data - reset duplicate counter
-            previous_acks[0] = previous_acks[1] = previous_acks[2] = -1;
+        if(recvpkt->hdr.ackno > send_base) {// if ack is new
+            previous_acks[0] = previous_acks[1] = previous_acks[2] = -1; // reset dupe ack array
             acknum = 0;
             
-            // Free acknowledged packets and update send_base
+            // free ack'd packet and update send base
             while(send_base < recvpkt->hdr.ackno) {
                 int idx = (send_base / DATA_SIZE) % window_size;
                 if(packet_window[idx] != NULL) {
@@ -283,49 +249,46 @@ int main (int argc, char **argv)
                     packet_window[idx] = NULL;
                 }
                 
-                // Increment by actual packet size or ACK value
+                // increment by full packet size
                 if (send_base + DATA_SIZE <= recvpkt->hdr.ackno) {
-                    send_base += DATA_SIZE; // Full packet
-                } else {
-                    send_base = recvpkt->hdr.ackno; // Partial packet or exact match
+                    send_base += DATA_SIZE; 
+                } else { // or increment by size of smaller packet size
+                    send_base = recvpkt->hdr.ackno; 
                 }
             }
             
-            // Handle timer
+            // time packet on new sendbase
             if(send_base < next_seqno) {
                 stop_timer();
                 start_timer();
             } else if (!eof_packet_sent && eof_reached) {
-                // If all data is acked and we have EOF, prepare to send EOF
+                // if eof reached stop timer 
                 stop_timer();
             } else {
                 stop_timer();
             }
         } else {
-            // This might be a duplicate ACK
+            // dupe ack received
             VLOG(INFO, "Duplicate ACK received");
-            previous_acks[acknum % 3] = recvpkt->hdr.ackno;
+            previous_acks[acknum % 3] = recvpkt->hdr.ackno; // add it to dupe ack array
             acknum++;
             
             // Check for triple duplicate ACKs
-            if (acknum >= 3 && 
-                previous_acks[0] == previous_acks[1] && 
-                previous_acks[1] == previous_acks[2] && 
-                previous_acks[0] != -1) {
+            if (acknum >= 3 && previous_acks[0] == previous_acks[1] && previous_acks[1] == previous_acks[2] && previous_acks[0] != -1) {
                 
-                VLOG(INFO, "3 Duplicate ACKs detected - Fast retransmit");
+                VLOG(INFO, "3 Duplicate ACKs detected - Fast retransmit"); 
                 
-                // Fast retransmit the missing packet
+                // fast retransmit the packet
                 int idx = (send_base / DATA_SIZE) % window_size;
                 tcp_packet* retransmit_packet = packet_window[idx];
                 
-                if (retransmit_packet != NULL) {
+                if (retransmit_packet != NULL) { // send oldest packet again
                     printf("Fast retransmitting packet with seqno: %d\n", retransmit_packet->hdr.seqno);
                     if(sendto(sockfd, retransmit_packet, TCP_HDR_SIZE + get_data_size(retransmit_packet), 0, 
                             (const struct sockaddr *)&serveraddr, serverlen) < 0) {
                         error("sendto");
                     }
-                    // Reset duplicate ACK counter
+                    // reset dupe ack array and ctr
                     previous_acks[0] = previous_acks[1] = previous_acks[2] = -1;
                     acknum = 0;
                 } else {
