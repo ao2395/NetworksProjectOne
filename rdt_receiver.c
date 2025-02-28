@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
                         fwrite(pkt->data, 1, pkt->hdr.data_size, fp);// writing thr data from the packet intot he file
                         fflush(fp);
                         
-                        // printf("Processed buffered packet with seqno %d\n", pkt->hdr.seqno); 
+                        VLOG(DEBUG, "%lu, %d, %d", tp.tv_sec, pkt->hdr.data_size, pkt->hdr.seqno);
                         expectedseq += pkt->hdr.data_size; //updating the expected sequence number by adding the size of the processed data
 
                         free(packet_buffer[i]); //freeing the slot that was for the packet and resetting the slot to show that its not in use any more 
@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
             //    recvpkt->hdr.seqno, expectedseq, recvpkt->hdr.data_size);
         
         if (expectedseq == recvpkt->hdr.seqno) { //cheking if the packet that was received matches witht he expected sequence number
-            VLOG(DEBUG, "%lu, %d, %d", tp.tv_sec, recvpkt->hdr.data_size, recvpkt->hdr.seqno); //logging the debug info
+            VLOG(DEBUG, "%lu, %d, %d", tp.tv_sec, recvpkt->hdr.data_size, recvpkt->hdr.seqno); 
             fseek(fp, recvpkt->hdr.seqno, SEEK_SET); //file pointer is at the position of the byte offset 
             fwrite(recvpkt->data, 1, recvpkt->hdr.data_size, fp); //writing the packet data into the file
             fflush(fp); //forcing the data to be written immediately 
@@ -205,7 +205,7 @@ int main(int argc, char **argv) {
                         fseek(fp, pkt->hdr.seqno, SEEK_SET); //writing the buffered packet's data into the file (next 3 lines)
                         fwrite(pkt->data, 1, pkt->hdr.data_size, fp);
                         fflush(fp);
-                        // printf("Processed buffered packet with seqno %d\n", pkt->hdr.seqno);
+                        VLOG(DEBUG, "%lu, %d, %d", tp.tv_sec, pkt->hdr.data_size, pkt->hdr.seqno);
                         //updating the expected seq number for the next packet
                         expectedseq += pkt->hdr.data_size;
 
