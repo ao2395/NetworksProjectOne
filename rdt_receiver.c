@@ -1,5 +1,4 @@
 
-// including the libraries 
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -10,7 +9,6 @@
 #include <arpa/inet.h>
 #include <sys/time.h>
 #include <assert.h>
-//including te header files
 #include "common.h"
 #include "packet.h"
 
@@ -118,7 +116,6 @@ int main(int argc, char **argv) {
 
         if (recvpkt->hdr.data_size == 0) { //to handle EOF, we check if the recieved packet is an EOF packet, we do this through looking at the data size, 0 indicating EOF
             VLOG(INFO, "End Of File packet received");
-            printf("EOF packet received, sending ACK\n");
             //do while loop so we can process buffered packets that can now be handled 
             int processed;
             do {
@@ -131,7 +128,7 @@ int main(int argc, char **argv) {
                         fwrite(pkt->data, 1, pkt->hdr.data_size, fp);// writing thr data from the packet intot he file
                         fflush(fp);
                         
-                        printf("Processed buffered packet with seqno %d\n", pkt->hdr.seqno); 
+                        // printf("Processed buffered packet with seqno %d\n", pkt->hdr.seqno); 
                         expectedseq += pkt->hdr.data_size; //updating the expected sequence number by adding the size of the processed data
 
                         free(packet_buffer[i]); //freeing the slot that was for the packet and resetting the slot to show that its not in use any more 
@@ -151,7 +148,7 @@ int main(int argc, char **argv) {
                 error("ERROR in sendto");
             }
             
-            printf("EOF ACK sent: %d\n", sndpkt->hdr.ackno); // printint that the EOF ACK was sent for checking 
+            // printf("EOF ACK sent: %d\n", sndpkt->hdr.ackno); // printint that the EOF ACK was sent for checking 
             eof_received = 1; //flag set to 1 to show received and acknowleged EOF ppacket 
 
             if (eof_received) { //handling EOF and retransmission in this if else statement 
@@ -163,8 +160,8 @@ int main(int argc, char **argv) {
                 FD_SET(sockfd, &readfds); // add sockets to the set 
           
                 int ready = select(sockfd + 1, &readfds, NULL, NULL, &wait_time); //wait for any activity on the socket or for the timeout to expire
-                if (ready <= 0) { //ready will return positive value if data is available, 0 for timeout, -ve for error
-                    printf("No more packets received, closing file\n");// indicates we had a timeout/ error
+                if (ready <= 0) { //monitor if new packets have been sent
+                    // printf("No more packets received, closing file\n");
                     for (int i = 0; i < BUFFER_SIZE; i++) { //freeing any packets left in the buffer 
                         if (buffer_used[i] && packet_buffer[i] != NULL) {
                             free(packet_buffer[i]);
@@ -177,9 +174,9 @@ int main(int argc, char **argv) {
                 continue;
             }
         }
-        gettimeofday(&tp, NULL); //gets the current time to store in the struct tp, and extra NULL param because we dont want timezone info 
-        printf("Packet received - seqno: %d, expected: %d, datasize: %d\n", //printing all info in the received packet
-               recvpkt->hdr.seqno, expectedseq, recvpkt->hdr.data_size);
+        gettimeofday(&tp, NULL); 
+        // printf("Packet received - seqno: %d, expected: %d, datasize: %d\n", //printing all info in the received packet
+            //    recvpkt->hdr.seqno, expectedseq, recvpkt->hdr.data_size);
         
         if (expectedseq == recvpkt->hdr.seqno) { //cheking if the packet that was received matches witht he expected sequence number
             VLOG(DEBUG, "%lu, %d, %d", tp.tv_sec, recvpkt->hdr.data_size, recvpkt->hdr.seqno); //logging the debug info
@@ -197,7 +194,7 @@ int main(int argc, char **argv) {
             }
             last_ack_sent = sndpkt->hdr.ackno; //updated to the last ACK sent
             expectedseq += recvpkt->hdr.data_size; //update the expected sequence number for the next packet 
-            printf("ACK sent: %d (updated expected to %d)\n", sndpkt->hdr.ackno, expectedseq); //logging info on ACK and the expcted sequence number 
+            // printf("ACK sent: %d (updated expected to %d)\n", sndpkt->hdr.ackno, expectedseq); //logging info on ACK and the expcted sequence number 
             int processed; //starting a do while loop to process any buffered packets
             do {
                 processed = 0; //flag set to 0 for now
@@ -208,7 +205,7 @@ int main(int argc, char **argv) {
                         fseek(fp, pkt->hdr.seqno, SEEK_SET); //writing the buffered packet's data into the file (next 3 lines)
                         fwrite(pkt->data, 1, pkt->hdr.data_size, fp);
                         fflush(fp);
-                        printf("Processed buffered packet with seqno %d\n", pkt->hdr.seqno);
+                        // printf("Processed buffered packet with seqno %d\n", pkt->hdr.seqno);
                         //updating the expected seq number for the next packet
                         expectedseq += pkt->hdr.data_size;
 
@@ -233,10 +230,10 @@ int main(int argc, char **argv) {
             }
         
             last_ack_sent = sndpkt->hdr.ackno; //updating the tracking variable
-            printf("Updated ACK sent after processing buffer: %d\n", sndpkt->hdr.ackno); //logging that an updated ACK was sent
+            // printf("Updated ACK sent after processing buffer: %d\n", sndpkt->hdr.ackno); //logging that an updated ACK was sent
         } else if (recvpkt->hdr.seqno > expectedseq) { // else if section to handle the case when the received packet had a seq number > expected meaning its out of order
-            printf("Out of order packet (seqno: %d, expected: %d) - buffering\n", 
-                   recvpkt->hdr.seqno, expectedseq);
+            // printf("Out of order packet (seqno: %d, expected: %d) - buffering\n", 
+            //        recvpkt->hdr.seqno, expectedseq);
             int slot = -1; // setting the slot to -1 to show that the slot has not been found yet
             for (int i = 0; i < BUFFER_SIZE; i++) { //looping over the buffer so we can find the first slot that is empty 
                 if (!buffer_used[i]) {
@@ -253,12 +250,12 @@ int main(int argc, char **argv) {
                     memcpy(packet_buffer[slot], recvpkt, size);// if so then we copy the packet recieved to the buffer space
                     buffer_seqno[slot] = recvpkt->hdr.seqno; //stores its respective sequence number
                     buffer_used[slot] = 1; //marks the flag to 1 to show that the space is no longer empty 
-                    printf("Buffered packet with seqno %d in slot %d\n", recvpkt->hdr.seqno, slot);
+                    // printf("Buffered packet with seqno %d in slot %d\n", recvpkt->hdr.seqno, slot);
                 } else { //otherwise
-                    printf("Failed to allocate memory for buffering packet\n"); //we indicate that the allocation was failed
+                    // printf("Failed to allocate memory for buffering packet\n"); //we indicate that the allocation was failed
                 }
             } else { // if there was no free buffer than log that the buffer is full and we will begin to have packet loss
-                printf("Buffer full, dropping out-of-order packet\n");
+                // printf("Buffer full, dropping out-of-order packet\n");
             }
             sndpkt = make_packet(0); //creating a new packet to send ACKS
             sndpkt->hdr.ackno = expectedseq; //set the ACK number to the whatever the expected seq number indicates, this was we can let the sender know that we still need the  expected seq numer 
@@ -269,9 +266,9 @@ int main(int argc, char **argv) {
                 error("ERROR in sendto");
             }
             
-            printf("Duplicate ACK sent: %d\n", sndpkt->hdr.ackno);//loggint the sending of the duplicate ACK and showing its ack number
+            // printf("Duplicate ACK sent: %d\n", sndpkt->hdr.ackno);//loggint the sending of the duplicate ACK and showing its ack number
         } else { // this final else handles the case when the seq number is less than expected meaning that the packet we processed already is retransmitted
-            printf("Received retransmission of already processed packet\n");
+            // printf("Received retransmission of already processed packet\n");
             sndpkt = make_packet(0);  //making the ACK packet with the expected sequence number 
             sndpkt->hdr.ackno = expectedseq;
             sndpkt->hdr.ctr_flags = ACK; //setting flag to ACK
@@ -280,7 +277,7 @@ int main(int argc, char **argv) {
                     (struct sockaddr *) &clientaddr, clientlen) < 0) { //sendin the ACK packet back to the client
                 error("ERROR in sendto");
             }
-            printf("ACK sent for retransmission: %d\n", sndpkt->hdr.ackno);
+            // printf("ACK sent for retransmission: %d\n", sndpkt->hdr.ackno);
         }
     }
 

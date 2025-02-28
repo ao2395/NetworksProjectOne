@@ -49,7 +49,7 @@ void resend_packets(int sig) //resend oldest packet
         
         // resend eof packet if needed
         if (eof_reached && eof_packet_sent && !eof_acked) {
-            printf("Timeout - Resending EOF packet\n");
+            printf("Timeout - eof packet resend\n");
             if(sendto(sockfd, eof_packet, TCP_HDR_SIZE, 0, 
                     (const struct sockaddr *)&serveraddr, serverlen) < 0) {
                 error("sendto");
@@ -58,13 +58,13 @@ void resend_packets(int sig) //resend oldest packet
             // send oldest packet normally
             tcp_packet* oldest_packet = packet_window[send_base/1456 % window_size]; 
             if (oldest_packet != NULL) {
-                printf("Timeout - Resending packet with seqno: %d\n", oldest_packet->hdr.seqno);
+                printf("Timeout - packet resend with seqno: %d\n", oldest_packet->hdr.seqno);
                 if(sendto(sockfd, oldest_packet, TCP_HDR_SIZE + get_data_size(oldest_packet), 0, 
                         (const struct sockaddr *)&serveraddr, serverlen) < 0) {
                     error("sendto");
                 }
             } else {
-                printf("Warning: No packet found at index %d to resend\n", send_base % window_size);
+                // printf("Warning: No packet found at index %d to resend\n", send_base % window_size);
             }
         }
         
@@ -158,7 +158,7 @@ int main (int argc, char **argv)
     while (1) {
         // when eof is acked exit
         if (eof_acked) {
-            printf("EOF packet has been acknowledged. Exiting cleanly.\n");
+            printf("EOF packet has been ack'd. Exiting .\n");
             break;
         }
         
@@ -184,8 +184,8 @@ int main (int argc, char **argv)
             sndpkt->hdr.seqno = next_seqno;
             
             // store in the window
-            int store_index = (next_seqno / DATA_SIZE) % window_size;
-            packet_window[store_index] = sndpkt;
+            int oldestpacket = (next_seqno / DATA_SIZE) % window_size;
+            packet_window[oldestpacket] = sndpkt;
             
             VLOG(DEBUG, "Sending packet %d to %s", 
                 next_seqno, inet_ntoa(serveraddr.sin_addr));
@@ -225,11 +225,11 @@ int main (int argc, char **argv)
         }
         
         recvpkt = (tcp_packet *)buffer;
-        printf("ACK RECEIVED: %d (send_base: %d)\n", 
-               recvpkt->hdr.ackno, 
-               send_base);
+        // printf("ACK RECEIVED: %d (send_base: %d)\n", 
+        //        recvpkt->hdr.ackno, 
+        //        send_base);
         
-        // check if ack is for eof (FIN FLAG)
+        // check if ack is for eof (FIN FLAG) so it doesnt mix up with dupe acks of the last packet
         if (eof_packet_sent && recvpkt->hdr.ackno >= next_seqno && recvpkt->hdr.ctr_flags==FIN) {
             printf("Received ACK for EOF packet\n");
             eof_acked = 1;
@@ -261,9 +261,6 @@ int main (int argc, char **argv)
             if(send_base < next_seqno) {
                 stop_timer();
                 start_timer();
-            } else if (!eof_packet_sent && eof_reached) {
-                // if eof reached stop timer 
-                stop_timer();
             } else {
                 stop_timer();
             }
@@ -279,8 +276,8 @@ int main (int argc, char **argv)
                 VLOG(INFO, "3 Duplicate ACKs detected - Fast retransmit"); 
                 
                 // fast retransmit the packet
-                int idx = (send_base / DATA_SIZE) % window_size;
-                tcp_packet* retransmit_packet = packet_window[idx];
+                int oldestpacket = (send_base / DATA_SIZE) % window_size;
+                tcp_packet* retransmit_packet = packet_window[oldestpacket];
                 
                 if (retransmit_packet != NULL) { // send oldest packet again
                     printf("Fast retransmitting packet with seqno: %d\n", retransmit_packet->hdr.seqno);
@@ -292,7 +289,7 @@ int main (int argc, char **argv)
                     previous_acks[0] = previous_acks[1] = previous_acks[2] = -1;
                     acknum = 0;
                 } else {
-                    printf("Warning: No packet found at index %d for fast retransmit\n", idx);
+                    printf("Warning: No packet found at index %d for fast retransmit\n", oldestpacket);
                 }
             }
         }
